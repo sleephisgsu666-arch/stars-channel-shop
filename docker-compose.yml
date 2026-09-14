@@ -1,0 +1,99 @@
+x-app: &app
+  build: .
+  restart: unless-stopped
+  environment:
+    BOT_TOKEN: ${BOT_TOKEN:?Set BOT_TOKEN}
+    WEBHOOK_BASE_URL: ${WEBHOOK_BASE_URL:?Set WEBHOOK_BASE_URL}
+    WEBHOOK_PATH: ${WEBHOOK_PATH:?Set WEBHOOK_PATH}
+    WEBHOOK_SECRET: ${WEBHOOK_SECRET:?Set WEBHOOK_SECRET}
+    DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL}
+    REDIS_URL: ${REDIS_URL:?Set REDIS_URL}
+    ADMIN_TELEGRAM_IDS: ${ADMIN_TELEGRAM_IDS:?Set ADMIN_TELEGRAM_IDS}
+    SUPPORT_CONTACT: ${SUPPORT_CONTACT:?Set SUPPORT_CONTACT}
+    TERMS_URL: ${TERMS_URL:?Set TERMS_URL}
+    TERMS_TEXT: ${TERMS_TEXT:-Цифровой доступ. Поддержка /paysupport.}
+    APP_ENV: ${APP_ENV:-production}
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    EXPIRE_INTERVAL: ${EXPIRE_INTERVAL:-60}
+    CLEANUP_INTERVAL: ${CLEANUP_INTERVAL:-300}
+    RECONCILIATION_INTERVAL: ${RECONCILIATION_INTERVAL:-7200}
+    INVITE_TTL: ${INVITE_TTL:-600}
+    ORDER_TTL: ${ORDER_TTL:-1800}
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  depends_on:
+    postgres: {condition: service_healthy}
+    redis: {condition: service_healthy}
+  networks: [backend]
+  logging:
+    driver: json-file
+    options: {max-size: "10m", max-file: "5"}
+services:
+  app:
+    <<: *app
+  worker:
+    <<: *app
+    command: [python, -m, app.jobs.worker]
+    healthcheck:
+      test: [CMD, python, -m, app.cli, worker-health]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+  migrate:
+    <<: *app
+    profiles: [tools]
+    restart: 'no'
+    environment:
+      DATABASE_URL: ${MIGRATION_DATABASE_URL:?Set MIGRATION_DATABASE_URL}
+    command: [alembic, upgrade, head]
+    healthcheck: {disable: true}
+  postgres:
+    image: postgres:16.14-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: shop
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?Set APP_DB_PASSWORD}
+      MIGRATOR_DB_PASSWORD: ${MIGRATOR_DB_PASSWORD:?Set MIGRATOR_DB_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/init-db.sh:/docker-entrypoint-initdb.d/10-roles.sh:ro
+    networks: [backend]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U postgres -d shop']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  redis:
+    image: redis:7.4.8-alpine
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD}
+    command: [/bin/sh, -c, 'exec redis-server --requirepass "$$REDIS_PASSWORD" --appendonly yes']
+    volumes: [redisdata:/data]
+    networks: [backend]
+    healthcheck:
+      test: [CMD-SHELL, 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli ping | grep -q PONG']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  nginx:
+    image: nginx:1.28.2-alpine
+    restart: unless-stopped
+    ports: ['443:443', '80:80']
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./deploy/tls:/etc/nginx/tls:ro
+    depends_on: [app]
+    networks: [backend]
+    healthcheck:
+      test: [CMD, nginx, -t]
+      interval: 30s
+      timeout: 5s
+volumes:
+  pgdata:
+  redisdata:
+networks:
+  backend:
