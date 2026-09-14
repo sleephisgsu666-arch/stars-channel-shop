@@ -14,25 +14,24 @@ if [ ! -f .env ]; then
 fi
 
 # Настройка локальных URL баз данных в .env
-sed -i 's|^APP_ENV=.*|APP_ENV=development|' .env || true
-sed -i 's|^DATABASE_URL=.*|DATABASE_URL=postgresql+asyncpg://shop_app:app_pass@localhost:5432/shop|' .env || true
-sed -i 's|^MIGRATION_DATABASE_URL=.*|MIGRATION_DATABASE_URL=postgresql+asyncpg://shop_migrator:migrator_pass@localhost:5432/shop|' .env || true
-sed -i 's|^REDIS_URL=.*|REDIS_URL=redis://localhost:6379/0|' .env || true
+sed -i 's|^APP_ENV=.*|APP_ENV=development|' .env 2>/dev/null || true
+sed -i 's|^DATABASE_URL=.*|DATABASE_URL=postgresql+asyncpg://shop_app:app_pass@localhost:5432/shop|' .env 2>/dev/null || true
+sed -i 's|^MIGRATION_DATABASE_URL=.*|MIGRATION_DATABASE_URL=postgresql+asyncpg://shop_migrator:migrator_pass@localhost:5432/shop|' .env 2>/dev/null || true
+sed -i 's|^REDIS_URL=.*|REDIS_URL=redis://localhost:6379/0|' .env 2>/dev/null || true
 
-# 2. Установка системных пакетов (если запущен под Linux с apt)
-if command -v apt >/dev/null 2>&1; then
-  echo "[+] Проверка и установка пакетов системы..."
-  export DEBIAN_FRONTEND=noninteractive
-  apt update -qq
-  apt install -y -qq python3 python3-venv python3-pip postgresql redis-server
-  
-  # Запуск служб
-  service postgresql start 2>/dev/null || systemctl start postgresql 2>/dev/null || true
-  service redis-server start 2>/dev/null || systemctl start redis-server 2>/dev/null || true
+# 2. Если запущен от root и есть apt — ставим и настраиваем службы
+if [ "$(id -u)" -eq 0 ]; then
+  if command -v apt >/dev/null 2>&1; then
+    echo "[+] Запуск от root: установка пакетов apt..."
+    export DEBIAN_FRONTEND=noninteractive
+    apt update -qq || true
+    apt install -y -qq python3 python3-venv python3-pip postgresql redis-server || true
+    
+    service postgresql start 2>/dev/null || systemctl start postgresql 2>/dev/null || true
+    service redis-server start 2>/dev/null || systemctl start redis-server 2>/dev/null || true
 
-  # 3. Настройка PostgreSQL
-  echo "[+] Настройка базы данных PostgreSQL..."
-  su - postgres -c "psql" >/dev/null 2>&1 << 'EOF' || true
+    echo "[+] Настройка базы данных PostgreSQL..."
+    su - postgres -c "psql" >/dev/null 2>&1 << 'EOF' || true
 CREATE USER shop_migrator WITH PASSWORD 'migrator_pass';
 CREATE USER shop_app WITH PASSWORD 'app_pass';
 CREATE DATABASE shop OWNER shop_migrator;
@@ -44,6 +43,15 @@ ALTER DEFAULT PRIVILEGES FOR ROLE shop_migrator IN SCHEMA shop GRANT USAGE, SELE
 ALTER ROLE shop_app SET search_path = shop;
 ALTER ROLE shop_migrator SET search_path = shop;
 EOF
+  fi
+else
+  echo "[i] Запуск от обычного пользователя ($(whoami)). Пропуск системной установки пакетов."
+fi
+
+# 3. Проверка Python
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "ОШИБКА: python3 не найден в системе. Установите python3."
+  exit 1
 fi
 
 # 4. Виртуальное окружение Python
@@ -61,13 +69,23 @@ if grep -q "^BOT_TOKEN=$" .env || grep -q "^BOT_TOKEN=[[:space:]]*$" .env; then
   echo -n "Введите ваш BOT_TOKEN от @BotFather: "
   read -r input_token
   if [ -n "$input_token" ]; then
-    sed -i "s|^BOT_TOKEN=.*|BOT_TOKEN=$input_token|" .env || true
+    sed -i "s|^BOT_TOKEN=.*|BOT_TOKEN=$input_token|" .env 2>/dev/null || true
   fi
 fi
 
 # 6. Накат миграций
 echo "[+] Накат миграций БД..."
-alembic upgrade head
+if ! alembic upgrade head; then
+  echo ""
+  echo "=========================================================="
+  echo "ОШИБКА: Не удалось подключиться к PostgreSQL."
+  echo "Если PostgreSQL ещё не запущен или вы не root, выполните:"
+  echo "  1) Переключитесь на root: su -"
+  echo "  2) Запустите скрипт заново: bash start_linux.sh"
+  echo "Или используйте Docker: docker compose run --rm migrate"
+  echo "=========================================================="
+  exit 1
+fi
 
 # 7. Запуск бота
 echo "========================================="
